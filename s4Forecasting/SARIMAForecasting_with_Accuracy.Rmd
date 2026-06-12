@@ -1,0 +1,194 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Univariate SARIMA for each month (preserving monthly patterns)
+
+```{r}
+library(forecast)
+library(tsibble)
+```
+
+```{r}
+backtest_sarima_monthly <- function(csv_file, district_name,
+                                     train_years = 7, h = 3,
+                                     seasonal = TRUE) {
+  
+  df <- read.csv(csv_file)
+  y_mat <- as.matrix(df)
+  colnames(y_mat) <- as.character(2015:(2015 + ncol(y_mat) - 1))
+  
+  n_total <- ncol(y_mat)
+  n_train <- train_years
+  n_test <- h
+  
+  # Split
+  y_train <- y_mat[, 1:n_train]
+  y_test <- y_mat[, (n_train + 1):n_total]
+  
+  n_months <- nrow(y_mat)  # Should be 12
+  
+  # Store predictions for each month
+  y_pred <- matrix(NA, nrow = n_months, ncol = n_test)
+  
+  # Fit separate SARIMA model for each month
+  for (month in 1:n_months) {
+    # Extract time series for this month across training years
+    monthly_ts <- ts(y_train[month, ], 
+                     start = c(2015, month), 
+                     frequency = 12)
+    
+    # Auto-select SARIMA model or use specified order
+    # Using auto.arima for simplicity, but you can specify custom orders
+    fit <- auto.arima(monthly_ts, 
+                      seasonal = seasonal,
+                      stepwise = FALSE,
+                      approximation = FALSE)
+    
+    # Forecast h years ahead
+    fc <- forecast(fit, h = n_test)
+    
+    # Store predictions
+    y_pred[month, ] <- as.numeric(fc$mean)
+  }
+  # Calculate errors
+  errors <- as.vector(y_test) - as.vector(y_pred)
+  rmse <- sqrt(mean(errors^2, na.rm = TRUE))
+  mae <- mean(abs(errors), na.rm = TRUE)
+  mape <- mean(abs(errors / as.vector(y_test)) * 100, na.rm = TRUE)
+  
+  # Monthly RMSE
+  monthly_rmse <- sqrt(rowMeans((y_test - y_pred)^2, na.rm = TRUE))
+  
+  list(
+    district = district_name,
+    rmse = round(rmse, 4),
+    mae = round(mae, 4),
+    mape = round(mape, 2),
+    monthly_rmse = round(monthly_rmse, 4),
+    y_actual = y_test,
+    y_pred = y_pred,
+    model_type = "SARIMA (monthly models)"
+  )
+}
+```
+
+```{r}
+# Run backtests
+results_sarima <- list(
+  backtest_sarima_monthly("Borguna.csv",    "Barguna"),
+  backtest_sarima_monthly("Joypurhat.csv",  "Joypurhat"),
+  backtest_sarima_monthly("Mymensingh.csv", "Mymensingh"),
+  backtest_sarima_monthly("Netrokona.csv",  "Netrokona")
+)
+```
+
+```{r}
+# Create accuracy table
+acc_table_sarima <- do.call(rbind, lapply(results_sarima, function(r) {
+  data.frame(
+    District = r$district,
+    RMSE     = r$rmse,
+    MAE      = r$mae,
+    MAPE     = paste0(r$mape, "%")
+  )
+}))
+```
+
+```{r}
+print(acc_table_sarima, row.names = FALSE)
+```
+
+```{r}
+backtest_sarima_long <- function(csv_file, district_name,
+                                  train_years = 7, h = 3) {
+  
+  df <- read.csv(csv_file)
+  y_mat <- as.matrix(df)
+  
+  n_total <- ncol(y_mat)
+  n_train <- train_years
+  n_test <- h
+  n_months <- nrow(y_mat)
+  
+  # Convert to long format time series
+  years <- 2015:(2015 + n_total - 1)
+  
+  # Create time series object (monthly data)
+  full_ts <- ts(as.vector(y_mat), 
+                start = c(2015, 1), 
+                frequency = 12)
+  
+  # Split into train and test
+  train_length <- n_train * n_months
+  train_ts <- window(full_ts, end = c(2015 + train_years - 1, n_months))
+  test_ts <- window(full_ts, start = c(2015 + train_years, 1))
+  
+  # Fit SARIMA model
+  # You can specify custom orders: ARIMA(p,d,q)(P,D,Q)[12]
+  # Example: fit <- Arima(train_ts, order = c(1,0,1), seasonal = c(1,0,1))
+  
+  # Auto-select best SARIMA model
+  fit <- auto.arima(train_ts, 
+                    seasonal = TRUE,
+                    stepwise = FALSE,
+                    approximation = FALSE,
+                    trace = FALSE)  # Set trace=TRUE to see model selection
+  
+  # Forecast
+  fc <- forecast(fit, h = n_test * n_months)
+  
+  # Reshape predictions to matrix (months × years)
+  y_pred <- matrix(fc$mean, nrow = n_months, ncol = n_test)
+  y_test <- y_mat[, (n_train + 1):n_total]
+  
+  # Calculate errors
+  errors <- as.vector(y_test) - as.vector(y_pred)
+  rmse <- sqrt(mean(errors^2, na.rm = TRUE))
+  mae <- mean(abs(errors), na.rm = TRUE)
+  mape <- mean(abs(errors / as.vector(y_test)) * 100, na.rm = TRUE)
+  
+  # Monthly RMSE
+  monthly_rmse <- sqrt(rowMeans((y_test - y_pred)^2, na.rm = TRUE))
+  
+  list(
+    district = district_name,
+    rmse = round(rmse, 4),
+    mae = round(mae, 4),
+    mape = round(mape, 2),
+    monthly_rmse = round(monthly_rmse, 4),
+    y_actual = y_test,
+    y_pred = y_pred,
+    model = fit,
+    model_type = "SARIMA (long format)"
+  )
+}
+```
+
+```{r}
+# Run backtests
+results_sarima_long <- list(
+  backtest_sarima_long("Borguna.csv",    "Barguna"),
+  backtest_sarima_long("Joypurhat.csv",  "Joypurhat"),
+  backtest_sarima_long("Mymensingh.csv", "Mymensingh"),
+  backtest_sarima_long("Netrokona.csv",  "Netrokona")
+)
+```
+
+```{r}
+# Create accuracy table
+acc_table_sarima_long <- do.call(rbind, lapply(results_sarima_long, function(r) {
+  data.frame(
+    District = r$district,
+    RMSE     = r$rmse,
+    MAE      = r$mae,
+    MAPE     = paste0(r$mape, "%")
+  )
+}))
+```
+
+```{r}
+print(acc_table_sarima_long, row.names = FALSE)
+```
+

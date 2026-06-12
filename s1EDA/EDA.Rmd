@@ -1,0 +1,602 @@
+---
+title: "EDA of Water Table Data"
+author: "**Istiak Ahmed***, SO, ASICT Division, BARI*"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(plotly)
+library(ggridges)
+library(viridis)
+library(ggExtra)
+library(patchwork)
+library(zoo)
+library(tsibble)
+library(feasts)
+library(imputeTS)
+library(gridExtra)
+library(corrplot)
+library(ggmap)  # For mapping (optional)
+library(leaflet)  # For interactive mapping
+library(colorspace)
+```
+
+# ============================
+# 1. DATA LOADING AND CLEANING
+# ============================
+
+```{r}
+# Read the data
+df <- read.csv("Water_Table_Data.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+# Check structure
+str(df)
+head(df)
+```
+
+```{r}
+# Convert Date to proper date format
+df$Date <- dmy(df$Date)  # Using lubridate's dmy function
+
+# Check for any parsing issues
+summary(df$Date)
+```
+
+```{r}
+# Check for duplicate rows
+duplicate_count <- sum(duplicated(df))
+cat("Number of duplicate rows:", duplicate_count, "\n")
+```
+
+```{r}
+# Sort by District and Date
+df <- df %>%
+  arrange(District, Date)
+```
+
+```{r}
+# Check for outliers (extreme values)
+summary(df$Water_Table_m)
+boxplot(df$Water_Table_m, main = "Boxplot of Water Table Depth",
+        ylab = "Depth (m)")
+```
+
+```{r}
+# Identify potential data entry errors (e.g., 36.6 for Tangail)
+potential_errors <- df %>%
+  filter(Water_Table_m > 12.23 | Water_Table_m < 0) %>%
+  arrange(desc(Water_Table_m))
+```
+
+```{r}
+as.data.frame(table(potential_errors$District))
+```
+
+```{r}
+potential_errors %>%
+  group_by(District) %>%
+  summarise(
+    count = n(),
+    across(Water_Table_m, list(min = min, mean = mean, max = max), .names = "{.fn}")
+  )
+```
+
+
+# ========================================
+# 2. DATA COVERAGE AND SUMMARY STATISTICS
+# ========================================
+
+```{r}
+# Date range
+date_range <- range(df$Date, na.rm = TRUE)
+cat("Data covers from", format(date_range[1], "%Y-%m-%d"), 
+    "to", format(date_range[2], "%Y-%m-%d"), "\n")
+```
+
+```{r}
+# Number of unique districts
+n_districts <- length(unique(df$District))
+cat("Number of unique districts:", n_districts, "\n")
+```
+
+```{r}
+# Observations per district
+district_counts <- df %>%
+  group_by(District) %>%
+  summarise(n_obs = n()) %>%
+  arrange(desc(n_obs))
+
+district_counts
+```
+
+
+```{r}
+# Read the well count data
+well_counts <- read.csv("Well_count.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+# Clean the well count data
+well_counts_clean <- well_counts %>%
+  # Remove rows with missing District
+  filter(!is.na(District) & District != "") %>%
+  # Group by District to get well count and total observations
+  group_by(District) %>%
+  summarise(
+    Well_Count = n_distinct(Well_ID[!is.na(Well_ID) & Well_ID != ""]),
+    Total_Observations = sum(Observation, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+```{r,fig.height=8,fig.width=10}
+enhanced_obs_plot <- well_counts_clean %>%
+  mutate(District = reorder(District, Total_Observations)) %>%
+  ggplot(aes(x = District, y = Total_Observations)) +
+  geom_bar(stat = "identity", aes(fill = Well_Count), alpha = 0.8) +
+  scale_fill_viridis_c(name = "Number of Wells", direction = -1) +
+  # Add text labels for well count
+  geom_text(aes(label = paste("Wells:", Well_Count), 
+                y = Total_Observations + max(Total_Observations) * 0.02),
+            size = 2.5, hjust = 0) +
+  coord_flip() +
+  labs(title = "Observations per District with Well Count Annotation",
+       subtitle = "Bar color indicates number of wells | Text shows exact well count",
+       x = "District", y = "Number of Observations") +
+  theme_classic() +
+  theme(axis.text.y = element_text(size = 7),
+        legend.position = "none")
+
+print(enhanced_obs_plot)
+```
+
+```{r}
+# Summary statistics by district
+summary_stats <- df %>%
+  group_by(District) %>%
+  summarise(
+    mean_depth = mean(Water_Table_m, na.rm = TRUE),
+    median_depth = median(Water_Table_m, na.rm = TRUE),
+    sd_depth = sd(Water_Table_m, na.rm = TRUE),
+    min_depth = min(Water_Table_m, na.rm = TRUE),
+    max_depth = max(Water_Table_m, na.rm = TRUE),
+    n_obs = n()
+  ) %>%
+  arrange(desc(mean_depth))
+
+summary_stats
+```
+
+
+# ===========================
+# 3. TEMPORAL VISUALIZATIONS
+# ===========================
+
+## 3.1 Overall "Spaghetti" Plot (all districts)
+
+```{r,fig.width=10}
+# Note: This can be very busy, so we'll use transparency
+spaghetti_plot <- ggplot(df, aes(x = Date, y = Water_Table_m, 
+                                  color = District, group = District)) +
+  geom_line(alpha = 0.4) +
+  labs(title = "Water Table Depth Over Time - All Districts",
+       x = "Date", y = "Water Table Depth (m)",
+       color = "District") +
+  theme_classic()+
+  theme(legend.position = "nonr")  # Hide legend to avoid clutter
+
+print(spaghetti_plot)
+```
+
+## 3.2 Time Series for a selection of districts (based on different regions)
+
+```{r,fig.width=10}
+selected_districts <- c("Rangpur", "Barisal", "Chattogram", "Mymensingh", 
+                        "Dhaka", "Rajshahi", "Sylhet", "Khulna")
+
+selected_plot <- df %>%
+  filter(District %in% selected_districts) %>%
+  ggplot(aes(x = Date, y = Water_Table_m, color = District)) +
+  geom_line(size = 0.8) +
+  facet_wrap(~District, scales = "free_y", ncol = 2) +
+  labs(title = "Water Table Trends - Selected Districts",
+       x = "Date", y = "Water Table Depth (m)") +
+  theme(legend.position = "none")
+
+print(selected_plot)
+```
+
+# ========================
+# 4. SEASONALITY ANALYSIS
+# ========================
+
+```{r}
+# Extract year and month
+df <- df %>%
+  mutate(
+    Year = year(Date),
+    Month = month(Date, label = TRUE, abbr = TRUE),
+    Year_Month = floor_date(Date, "month")
+  )
+```
+
+## 4.1 Monthly averages across all districts
+
+```{r}
+monthly_avg <- df %>%
+  group_by(Month) %>%
+  summarise(
+    mean_depth = mean(Water_Table_m, na.rm = TRUE),
+    sd_depth = sd(Water_Table_m, na.rm = TRUE)
+  )
+
+seasonal_plot <- ggplot(monthly_avg, aes(x = Month, y = mean_depth, group = 1)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_errorbar(aes(ymin = mean_depth - sd_depth, 
+                    ymax = mean_depth + sd_depth), 
+                width = 0.2, alpha = 0.5) +
+  labs(title = "Seasonal Pattern - Monthly Average Water Table Depth",
+       x = "Month", y = "Water Table Depth (m)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(seasonal_plot)
+```
+
+## 4.2 Seasonal heatmap (Month x Year)
+
+```{r}
+seasonal_heatmap_data <- df %>%
+  group_by(Year, Month) %>%
+  summarise(mean_depth = mean(Water_Table_m, na.rm = TRUE)) %>%
+  filter(Year >= 2015 & Year <= 2024)  # Focus on complete years
+
+heatmap_plot <- ggplot(seasonal_heatmap_data, 
+                       aes(x = Month, y = Year, fill = mean_depth)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Depth (m)", direction = -1) +
+  labs(title = "Seasonal Heatmap: Water Table Depth",
+       x = "Month", y = "Year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(heatmap_plot)
+```
+
+
+## 4.3 Ridgeline plot to show seasonal distribution
+
+```{r,fig.width=10}
+ridge_plot <- ggplot(df, aes(x = Water_Table_m, y = Month, fill = after_stat(x))) +
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+  scale_fill_viridis_c(name = "Depth (m)", direction = -1) +
+  labs(title = "Distribution of Water Table Depth by Month",
+       x = "Water Table Depth (m)", y = "Month")+
+  theme_classic()
+
+print(ridge_plot)
+```
+
+
+## 4.4 Seasonal decomposition for a specific district
+
+```{r}
+# Choose a district with good data coverage
+decomp_district <- "Mymensingh"
+
+district_ts <- df %>%
+  filter(District == decomp_district) %>%
+  arrange(Date) %>%
+  select(Date, Water_Table_m)
+
+# Interpolate to regular interval for decomposition
+# (Decomposition works better with regular time series)
+full_dates <- seq(min(district_ts$Date), max(district_ts$Date), by = "week")
+interpolated <- approx(district_ts$Date, district_ts$Water_Table_m, 
+                       xout = full_dates, rule = 2)
+interpolated_ts <- ts(interpolated$y, frequency = 52, start = c(2015, 1))
+
+# Decompose
+decomp <- stl(interpolated_ts, s.window = "periodic")
+
+# Plot decomposition
+decomp_plot <- autoplot(decomp) +
+  labs(title = paste("Seasonal Decomposition -", decomp_district))
+
+print(decomp_plot)
+```
+
+
+# =========================================
+# 5. DISTRIBUTION AND VARIABILITY ANALYSIS
+# =========================================
+
+## 5.1 Overall distribution
+
+```{r}
+overall_dist <- ggplot(df, aes(x = Water_Table_m)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 50, 
+                 fill = "steelblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Overall Distribution of Water Table Depth",
+       x = "Depth (m)", y = "Density")
+
+print(overall_dist)
+```
+
+
+## 5.2 Boxplot by district
+
+```{r,fig.height=15}
+boxplot_district <- ggplot(df, aes(x = reorder(District, Water_Table_m, median), 
+                                    y = Water_Table_m)) +
+  geom_boxplot(fill = "lightblue", outlier.color = "red", outlier.size = 0.5) +
+  coord_flip() +
+  labs(title = "Water Table Depth Distribution by District",
+       x = "District", y = "Depth (m)") +
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 15))
+  
+print(boxplot_district)
+```
+
+
+## 5.3 Violin plot for top 20 districts
+
+```{r}
+top_20_districts <- district_counts %>%
+  head(20) %>%
+  pull(District)
+
+violin_plot <- df %>%
+  filter(District %in% top_20_districts) %>%
+  ggplot(aes(x = reorder(District, Water_Table_m, median), 
+             y = Water_Table_m, fill = District)) +
+  geom_violin(alpha = 0.7) +
+  geom_boxplot(width = 0.1, fill = "white", alpha = 0.5) +
+  coord_flip() +
+  labs(title = "Distribution of Water Table Depth - Top 20 Districts",
+       x = "District", y = "Depth (m)") +
+  theme_classic()+
+  theme(legend.position = "none")
+
+print(violin_plot)
+```
+
+
+## 5.4 Monthly boxplots (seasonal distribution)
+
+```{r}
+monthly_boxplot <- ggplot(df, aes(x = Month, y = Water_Table_m, fill = Month)) +
+  geom_boxplot() +
+  labs(title = "Monthly Distribution of Water Table Depth",
+       x = "Month", y = "Depth (m)") +
+  theme(legend.position = "none")
+
+print(monthly_boxplot)
+```
+
+
+# ====================
+# 6. SPATIAL ANALYSIS
+# ====================
+
+## 6.1 Map of mean water table depth
+
+```{r}
+# Note: You'll need to get actual coordinates or use district centroids
+# For demonstration, I'll use approximate centroids for major cities
+# (You should use the actual LATITUDE and LONGITUDE from your data)
+
+# Check if coordinates are available
+if(all(c("LATITUDE", "LONGITUDE") %in% names(df))) {
+  # Use actual coordinates from data
+  district_coords <- df %>%
+    group_by(District) %>%
+    summarise(
+      lat = mean(LATITUDE, na.rm = TRUE),
+      lon = mean(LONGITUDE, na.rm = TRUE),
+      mean_depth = mean(Water_Table_m, na.rm = TRUE),
+      sd_depth = sd(Water_Table_m, na.rm = TRUE)
+    )
+  
+  # Create map with ggplot2
+  map_plot <- ggplot(district_coords, aes(x = lon, y = lat, 
+                                          color = mean_depth, size = sd_depth)) +
+    geom_point(alpha = 0.8) +
+    scale_color_viridis_c(name = "Mean Depth (m)", direction = -1) +
+    scale_size_continuous(name = "Variability (SD)") +
+    labs(title = "Spatial Distribution of Mean Water Table Depth",
+         x = "Longitude", y = "Latitude") +
+    theme_minimal()
+  
+  print(map_plot)
+}
+```
+
+
+# ========================
+# 7. CORRELATION ANALYSIS
+# ========================
+
+## 7.1 Create a regular time grid for correlation analysis
+
+```{r}
+# First, interpolate each district to a common time grid
+common_dates <- seq(min(df$Date), max(df$Date), by = "month")
+
+# Function to interpolate time series for a district
+interpolate_district <- function(district_name) {
+  district_data <- df %>%
+    filter(District == district_name) %>%
+    arrange(Date) %>%
+    select(Date, Water_Table_m)
+  
+  # Interpolate missing values
+  interp_data <- approx(district_data$Date, district_data$Water_Table_m, 
+                        xout = common_dates, rule = 2)
+  
+  return(data.frame(
+    Date = interp_data$x,
+    Water_Table_m = interp_data$y,
+    District = district_name
+  ))
+}
+
+# Interpolate for all districts (limit to those with enough data)
+districts_with_data <- district_counts %>%
+  filter(n_obs >= 30) %>%
+  pull(District)
+
+interpolated_data <- map_df(districts_with_data, interpolate_district)
+```
+
+
+## 7.2 Correlation matrix
+
+```{r}
+# Convert to wide format
+wide_data <- interpolated_data %>%
+  pivot_wider(id_cols = Date, names_from = District, values_from = Water_Table_m)
+
+# Remove date column for correlation
+cor_matrix <- cor(wide_data[, -1], use = "pairwise.complete.obs")
+```
+
+```{r,fig.height=12,fig.width=15}
+# Correlation heatmap
+corrplot_plot <- corrplot(cor_matrix, method = "color", 
+                          type = "upper", order = "hclust",
+                          tl.col = "black", tl.srt = 45,
+                          title = "Correlation Between Districts",
+                          mar = c(0, 0, 2, 0))
+```
+
+
+## 7.3 Find most correlated districts
+
+```{r}
+# Convert to data frame and find top correlations
+cor_df <- as.data.frame(as.table(cor_matrix))
+cor_df <- cor_df %>%
+  filter(as.character(Var1) != as.character(Var2)) %>%
+  arrange(desc(Freq))
+
+print("Top 10 most correlated district pairs:")
+head(cor_df, 10)
+```
+
+
+## 7.4 Dendrogram of district similarity
+
+```{r,fig.height=10}
+library(ggdendro)
+dist_matrix <- as.dist(1 - cor_matrix)
+hc <- hclust(dist_matrix, method = "ward.D2")
+
+dendro_plot <- ggdendro::ggdendrogram(hc, rotate = TRUE, size = 2) +
+  labs(title = "Dendrogram of District Similarity Based on Water Table Patterns",
+       x = "District", y = "Distance")
+
+print(dendro_plot)
+```
+
+
+# ===========================
+# 8. FUNCTIONAL DATA PREVIEW
+# ===========================
+
+## 8.1 Mean curve and functional envelope
+
+```{r}
+# Plot mean ± standard deviation for all districts
+mean_curve <- interpolated_data %>%
+  group_by(Date) %>%
+  summarise(
+    mean_depth = mean(Water_Table_m, na.rm = TRUE),
+    sd_depth = sd(Water_Table_m, na.rm = TRUE)
+  )
+
+functional_preview <- ggplot(mean_curve, aes(x = Date, y = mean_depth)) +
+  geom_ribbon(aes(ymin = mean_depth - sd_depth, 
+                  ymax = mean_depth + sd_depth), 
+              alpha = 0.3, fill = "steelblue") +
+  geom_line(color = "steelblue", size = 1) +
+  labs(title = "Functional Data Preview: Mean ± 1 SD",
+       subtitle = "Average water table pattern across all districts",
+       x = "Date", y = "Water Table Depth (m)") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5)
+
+print(functional_preview)
+```
+
+
+## 8.2 Smoothed curves for selected districts
+
+```{r}
+# This gives a preview of what your fPCA will capture
+library(mgcv)
+```
+
+```{r,fig.width=10}
+smooth_preview <- df %>%
+  filter(District %in% selected_districts) %>%
+  ggplot(aes(x = Date, y = Water_Table_m, color = District)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), se = FALSE) +
+  facet_wrap(~District, scales = "free_y", ncol = 2) +
+  labs(title = "Smoothed Trends - Preview for fPCA",
+       x = "Date", y = "Water Table Depth (m)") +
+  theme(legend.position = "none")
+
+print(smooth_preview)
+```
+
+
+# ============================
+# 9. ADVANCED VISUALIZATIONS
+# ============================
+
+## 9.1 Small multiples of all districts
+
+```{r,fig.height=10,fig.width=10}
+small_multiples <- df %>%
+  ggplot(aes(x = Date, y = Water_Table_m)) +
+  geom_line(color = "steelblue", alpha = 0.7) +
+  facet_wrap(~District, scales = "free_y", ncol = 8) +
+  labs(title = "Water Table Trends - All Districts",
+       x = "Date", y = "Depth (m)") +
+  theme(strip.text = element_text(size = 6),
+        axis.text = element_text(size = 6))
+
+print(small_multiples)
+```
+
+
+## 9.2 Heatmap of water table depth by district and year
+
+```{r,fig.height=15}
+yearly_heatmap <- df %>%
+  mutate(Year = year(Date)) %>%
+  group_by(District, Year) %>%
+  summarise(mean_depth = mean(Water_Table_m, na.rm = TRUE)) %>%
+  filter(Year >= 2015 & Year <= 2024) %>%
+  ggplot(aes(x = Year, y = reorder(District, mean_depth), fill = mean_depth)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Depth (m)", direction = -1) +
+  labs(title = "Yearly Average Water Table Depth by District",
+       x = "Year", y = "District") +
+  theme(axis.text.y = element_text(size = 12))
+
+print(yearly_heatmap)
+```
+

@@ -1,0 +1,207 @@
+---
+title: "Imputation"
+author: "**Istiak Ahmed***, SO, ASICT Division, BARI*"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+library(fda)
+```
+
+```{r}
+df <- read.csv("dis_data.csv")
+```
+
+```{r}
+t <- 1:nrow(df)
+districts <- c("Barguna", "Netrokona", "Joypurhat", "Mymensingh")
+```
+
+```{r}
+nbasis <- 21
+basis <- create.fourier.basis(rangeval = c(1,120), nbasis = nbasis)
+```
+
+```{r}
+imputed_data <- df
+
+for (d in districts) {
+  
+  y <- df[[d]]
+  
+  # remove NA for fitting
+  observed_idx <- which(!is.na(y))
+  
+  t_obs <- t[observed_idx]
+  y_obs <- y[observed_idx]
+  
+  # smooth using only observed points
+  fd_fit <- smooth.basis(argvals = t_obs,
+                         y = y_obs,
+                         fdParobj = basis)$fd
+  
+  # predict for all time points
+  y_fitted <- eval.fd(t, fd_fit)
+  
+  # replace only missing values
+  missing_idx <- which(is.na(y))
+  imputed_data[[d]][missing_idx] <- y_fitted[missing_idx]
+}
+```
+
+```{r}
+# write.csv(imputed_data, "imputed_water_table.csv", row.names = FALSE)
+```
+
+```{r}
+colSums(is.na(df))
+colSums(is.na(imputed_data))
+```
+
+```{r,fig.width=10}
+# Set up 2x2 plotting grid
+par(mfrow = c(2, 2))
+
+# Plot each district
+plot(t, df$Barguna, pch=16, col="grey", main="Barguna",
+     xlab = 'Year', ylab = 'Water Table (m)', xaxt = "n")
+axis(1, at = seq(1, 120, by = 12), labels = seq(2015, 2024, by = 1))
+lines(t, imputed_data$Barguna, col="blue", lwd=2)
+
+plot(t, df$Netrokona, pch=16, col="grey", main="Netrokona",
+     xlab = 'Year', ylab = 'Water Table (m)', xaxt = "n")
+axis(1, at = seq(1, 120, by = 12), labels = seq(2015, 2024, by = 1))
+lines(t, imputed_data$Netrokona, col="blue", lwd=2)
+
+plot(t, df$Joypurhat, pch=16, col="grey", main="Joypurhat",
+     xlab = 'Year', ylab = 'Water Table (m)', xaxt = "n")
+axis(1, at = seq(1, 120, by = 12), labels = seq(2015, 2024, by = 1))
+lines(t, imputed_data$Joypurhat, col="blue", lwd=2)
+
+plot(t, df$Mymensingh, pch=16, col="grey", main="Mymensingh",
+     xlab = 'Year', ylab = 'Water Table (m)', xaxt = "n")
+axis(1, at = seq(1, 120, by = 12), labels = seq(2015, 2024, by = 1))
+lines(t, imputed_data$Mymensingh, col="blue", lwd=2)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+```
+
+```{r}
+districts <- c("Barguna", "Netrokona", "Joypurhat", "Mymensingh")
+```
+
+## ----------------------------------------------------------
+## Build tidy long-format data with observation type labels
+## ----------------------------------------------------------
+
+```{r}
+build_plot_df <- function(district) {
+  obs_vals  <- df[[district]]
+  imp_vals  <- imputed_data[[district]]
+
+  data.frame(
+    t        = t,
+    Observed = obs_vals,
+    Imputed  = imp_vals,
+    Year     = rep(2015:2024, each = 12)[t],
+    Type     = ifelse(is.na(obs_vals), "Imputed", "Observed")
+  )
+}
+```
+
+```{r}
+plot_list <- lapply(districts, function(d) {
+  df_plot <- build_plot_df(d)
+
+  # Year axis ticks
+  year_ticks  <- seq(1, 120, by = 12)
+  year_labels <- 2015:2024
+
+  # Separate data for points
+  obs_pts <- df_plot %>% filter(Type == "Observed")
+  imp_pts <- df_plot %>% filter(Type == "Imputed")
+
+  ggplot(df_plot, aes(x = t)) +
+    # Fitted curve (blue, full series)
+    geom_line(aes(y = Imputed), color = "#1B6CA8", linewidth = 0.9,
+              linetype = "solid") +
+    # Observed points (dark grey filled circles)
+    geom_point(data = obs_pts, aes(y = Observed, shape = "Observed"),
+               color = "grey30", size = 1.8, alpha = 0.85) +
+    # Imputed points (red triangles, larger for visibility)
+    geom_point(data = imp_pts, aes(y = Imputed, shape = "Imputed"),
+               color = "#C0392B", size = 3, alpha = 0.9) +
+    scale_shape_manual(
+      values = c("Observed" = 16, "Imputed" = 17),
+      name   = NULL
+    ) +
+    scale_x_continuous(breaks = year_ticks, labels = year_labels) +
+    labs(
+      title = d,
+      x     = "Year",
+      y     = "Water Table Depth (m)"
+    ) +
+    annotate("text",
+             x = max(imp_pts$t, na.rm = TRUE),
+             y = Inf,
+             label = paste0(nrow(imp_pts), " month(s) imputed"),
+             hjust = 1.1, vjust = 1.5,
+             size = 3, color = "#C0392B") +
+    theme_classic() +
+    theme(
+      plot.title      = element_text(size = 11, face = "bold"),
+      axis.text.x     = element_text(angle = 45, hjust = 1, size = 8),
+      legend.position = "bottom",
+      legend.key.size = unit(0.4, "cm")
+    )
+})
+```
+
+## ----------------------------------------------------------
+## 2x2 combined panel
+## ----------------------------------------------------------
+
+```{r,fig.height=10,fig.width=10}
+(plot_list[[1]] | plot_list[[2]]) /
+  (plot_list[[3]] | plot_list[[4]]) +
+  plot_annotation(
+    title   = "FDA-Based Imputation of Missing Monthly Water Table Values",
+    subtitle = paste0(
+      "Blue line: Fourier-smoothed fit  |  ",
+      "\u25CF Grey circles: observed  |  ",
+      "\u25B2 Red triangles: imputed values"
+    ),
+    theme = theme(
+      plot.title    = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 9, color = "grey30")
+    )
+  )
+```
+
+## ----------------------------------------------------------
+## Tabulate where (which months/years) imputation occurred
+## ----------------------------------------------------------
+
+```{r}
+cat("=== Imputed Months by District ===\n")
+for (d in districts) {
+  missing_idx <- which(is.na(df[[d]]))
+  years_miss  <- ((missing_idx - 1) %/% 12) + 2015
+  months_miss <- ((missing_idx - 1) %% 12) + 1
+  cat(sprintf("\n%s (%d missing):\n", d, length(missing_idx)))
+  print(data.frame(Index = missing_idx,
+                   Year  = years_miss,
+                   Month = month.abb[months_miss]))
+}
+```
+
+

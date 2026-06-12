@@ -1,0 +1,440 @@
+---
+title: "R Notebook"
+author: "**Istiak Ahmed***, SO, ASICT Division, BARI*"
+output: html_notebook
+---
+
+## ============================================================
+## Strategy: train on 2015–2021 (7 years), test on 2022–2024 (3 years)
+### Apply to all 4 districts consistently
+## ============================================================
+
+```{r}
+library(ftsa)
+```
+
+## ----------------------------------------------------------
+## Helper: compute accuracy metrics for one district
+## ----------------------------------------------------------
+
+```{r}
+backtest_district <- function(csv_file, district_name,
+                               train_years = 7, h = 3,
+                               order = 3) {
+
+  df    <- read.csv(csv_file)
+  y_mat <- as.matrix(df)
+  colnames(y_mat) <- as.character(2015:(2015 + ncol(y_mat) - 1))
+
+  n_total <- ncol(y_mat)          # should be 10
+  n_train <- train_years          # 8
+  n_test  <- n_total - n_train    # 2
+
+  # Split
+  y_train <- y_mat[, 1:n_train]
+  y_test  <- y_mat[, (n_train + 1):n_total]
+
+  x <- 1:nrow(y_mat)  # months 1–12
+
+  # Fit on training set
+  fts_train <- fts(x      = x,
+                   y      = y_train,
+                   xname  = "Month",
+                   yname  = "Water Table Depth")
+
+  fit <- ftsm(fts_train, order = order, method = "rapca")
+
+  # Forecast h years ahead
+  fc  <- forecast(fit, h = n_test, method = "arfima")
+
+  # Predicted values: fc$mean$y is a 12 x h matrix
+  y_pred <- fc$mean$y   # rows = months, cols = forecast years
+
+  # Actual test values
+  y_actual <- y_test    # 12 x 2 matrix
+
+  # Flatten for metrics
+  errors   <- as.vector(y_actual) - as.vector(y_pred)
+  rmse     <- sqrt(mean(errors^2, na.rm = TRUE))
+  mae      <- mean(abs(errors),   na.rm = TRUE)
+  mape     <- mean(abs(errors / as.vector(y_actual)) * 100, na.rm = TRUE)
+
+  # Monthly RMSE (useful to see which months are hardest to predict)
+  monthly_rmse <- apply((y_actual - y_pred)^2, 1, function(x) sqrt(mean(x, na.rm = TRUE)))
+
+  list(
+    district     = district_name,
+    rmse         = round(rmse, 4),
+    mae          = round(mae, 4),
+    mape         = round(mape, 2),
+    monthly_rmse = round(monthly_rmse, 4),
+    y_actual     = y_actual,
+    y_pred       = y_pred,
+    y_train      = y_train,
+    x            = x,
+    varprop      = fit$varprop
+  )
+}
+```
+
+## ----------------------------------------------------------
+## Run for all 4 districts
+### Adjust file paths to match your working directory
+## ----------------------------------------------------------
+
+```{r}
+results <- list(
+  backtest_district("Borguna.csv",    "Barguna"),
+  backtest_district("Joypurhat.csv",  "Joypurhat"),
+  backtest_district("Mymensingh.csv", "Mymensingh"),
+  backtest_district("Netrokona.csv",  "Netrokona",  order = 5)
+)
+```
+
+#### Note: Netrokona uses order=5 due to its lower PC1 variance explained (37.8%)
+
+## ----------------------------------------------------------
+## Accuracy table (for the paper)
+## ----------------------------------------------------------
+
+```{r}
+acc_table <- do.call(rbind, lapply(results, function(r) {
+  data.frame(District = r$district,
+             RMSE     = r$rmse,
+             MAE      = r$mae,
+             MAPE     = paste0(r$mape, "%")
+             )
+}))
+```
+
+```{r}
+print("=== Forecast Accuracy (2-year holdout: 2023–2024) ===")
+print(acc_table, row.names = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+```{r}
+acc_long <- acc_table %>%
+  select(District, RMSE, MAE) %>%
+  pivot_longer(cols = c(RMSE, MAE), names_to = "Metric", values_to = "Value")
+```
+
+
+```{r}
+ggplot(acc_long, aes(x = District, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) +
+  scale_fill_manual(values = c("RMSE" = "#1B6CA8", "MAE" = "#16A085")) +
+  labs(title    = "Forecast Accuracy by District (2-Year Holdout)",
+       subtitle = "Training: 2015–2022 | Test: 2023–2024",
+       x = NULL, y = "Error (metres)", fill = NULL) +
+  theme_classic() +
+  theme(plot.title    = element_text(size = 13, face = "bold"),
+        legend.position = "top")
+```
+
+
+
+## ----------------------------------------------------------
+## Visual: Actual vs Predicted for each district
+## ----------------------------------------------------------
+
+```{r,fig.height=10,fig.width=10}
+month_labels <- month.abb
+
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+
+for (r in results) {
+  # Training years on x-axis, then test years
+  n_train <- ncol(r$y_train)
+
+  # Plot all observed years (grey)
+  matplot(r$x, r$y_train,
+          type = "l", col = "grey70", lty = 1, lwd = 1,
+          xlab = "Month", ylab = "Water Table Depth (m)",
+          main = r$district,
+          xaxt = "n", ylim = range(c(r$y_train, r$y_actual, r$y_pred), na.rm = TRUE))
+  axis(1, at = 1:12, labels = month_labels, las = 2, cex.axis = 0.7)
+
+  # Actual test years (solid dark)
+  matlines(r$x, r$y_actual, col = c("black", "black"), lty = c(1, 2), lwd = 2)
+
+  # Predicted test years (coloured)
+  matlines(r$x, r$y_pred, col = c("#C0392B", "#C0392B"), lty = c(1, 2), lwd = 2)
+
+  legend("topright",
+         legend = c("Training", "Actual 2023", "Actual 2024",
+                    "Forecast 2023", "Forecast 2024"),
+         col    = c("grey70", "black", "black", "#C0392B", "#C0392B"),
+         lty    = c(1, 1, 2, 1, 2),
+         lwd    = c(1, 2, 2, 2, 2),
+         cex    = 0.6, bty = "n")
+
+  mtext(paste0("RMSE=", r$rmse, "  MAE=", r$mae), side = 3,
+        line = -1.2, cex = 0.7, col = "grey30")
+}
+```
+
+
+## ----------------------------------------------------------
+## Monthly RMSE heatmap (shows which months are hardest)
+## ----------------------------------------------------------
+
+```{r}
+monthly_df <- do.call(rbind, lapply(results, function(r) {
+  data.frame(
+    District = r$district,
+    Month    = month.abb,
+    RMSE     = r$monthly_rmse
+  )
+}))
+monthly_df$Month <- factor(monthly_df$Month, levels = month.abb)
+```
+
+
+```{r}
+ggplot(monthly_df, aes(x = Month, y = District, fill = RMSE)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = round(RMSE, 2)), size = 3) +
+  scale_fill_gradient(low = "#EAF3DE", high = "#A32D2D",
+                      name = "RMSE (m)") +
+  labs(title    = "Monthly Forecast RMSE by District",
+       subtitle = "Higher values indicate months with greater forecast error",
+       x = NULL, y = NULL) +
+  theme_classic() +
+  theme(axis.text.x   = element_text(angle = 45, hjust = 1),
+        plot.title     = element_text(size = 13, face = "bold"))
+```
+
+
+## ----------------------------------------------------------
+## District configuration
+### Use order=5 for Netrokona (low PC1 variance), 3 for others
+## ----------------------------------------------------------
+
+```{r}
+district_configs <- list(
+  list(file = "Borguna.csv",    name = "Barguna",    order = 3),
+  list(file = "Joypurhat.csv",  name = "Joypurhat",  order = 3),
+  list(file = "Mymensingh.csv", name = "Mymensingh", order = 3),
+  list(file = "Netrokona.csv",  name = "Netrokona",  order = 5)
+)
+```
+
+```{r}
+train_years    <- 2015:2024
+forecast_years <- 2025:2030
+month_labels   <- month.abb
+```
+ 
+## ----------------------------------------------------------
+## Fit and forecast for each district
+## ----------------------------------------------------------
+
+```{r}
+full_forecasts <- lapply(district_configs, function(cfg) {
+ 
+  df    <- read.csv(cfg$file)
+  y_mat <- as.matrix(df)
+  colnames(y_mat) <- as.character(train_years)
+  x <- 1:nrow(y_mat)
+ 
+  fts_obj <- fts(x      = x,
+                 y      = y_mat,
+                 xname  = "Month",
+                 yname  = "Water Table Depth")
+ 
+  fit <- ftsm(fts_obj, order = cfg$order, method = "rapca")
+  fc  <- forecast(fit, h = 6, method = "arfima")
+ 
+  # fc$mean$y is a 12 x 6 matrix (rows=months, cols=forecast years)
+  fc_mat <- fc$mean$y
+  colnames(fc_mat) <- as.character(forecast_years)
+ 
+  list(
+    name      = cfg$name,
+    order     = cfg$order,
+    varprop   = fit$varprop,
+    y_train   = y_mat,
+    fc_mat    = fc_mat
+  )
+})
+```
+
+## ----------------------------------------------------------
+## Build tidy long-format data for plotting
+## ----------------------------------------------------------
+
+```{r}
+build_plot_data <- function(res) {
+ 
+  # Historical
+  hist_df       <- as.data.frame(res$y_train)
+  hist_df$Month <- 1:12
+  hist_long     <- pivot_longer(hist_df, -Month,
+                                names_to  = "Year",
+                                values_to = "Value") %>%
+    mutate(Year   = as.integer(Year),
+           Series = "Historical")
+ 
+  # Forecast
+  fc_df       <- as.data.frame(res$fc_mat)
+  fc_df$Month <- 1:12
+  fc_long     <- pivot_longer(fc_df, -Month,
+                              names_to  = "Year",
+                              values_to = "Value") %>%
+    mutate(Year   = as.integer(Year),
+           Series = "Forecast")
+ 
+  # Stitch last observed year to first forecast year for visual continuity
+  bridge <- hist_long %>%
+    filter(Year == max(train_years)) %>%
+    mutate(Series = "Forecast")
+ 
+  bind_rows(hist_long, bridge, fc_long)
+}
+```
+
+```{r}
+all_plot_data <- lapply(full_forecasts, build_plot_data)
+```
+
+## ----------------------------------------------------------
+## PLOT 1: Faceted by month (12-panel grid per district)
+### Shows how each calendar month evolves over 2015–2030
+## ----------------------------------------------------------
+
+```{r}
+plot_faceted <- function(res, dat) {
+ 
+  ggplot(dat, aes(x = Year, y = Value, color = Series, linetype = Series)) +
+    geom_line(linewidth = 0.8) +
+    geom_vline(xintercept = 2024.5,
+               linetype = "dotted", color = "grey40", linewidth = 0.5) +
+    facet_wrap(~ Month, nrow = 3, ncol = 4,
+               labeller = labeller(Month = setNames(month_labels, 1:12))) +
+    scale_color_manual(
+      values = c("Historical" = "grey40", "Forecast" = "#C0392B"),
+      name   = NULL
+    ) +
+    scale_linetype_manual(
+      values = c("Historical" = "solid", "Forecast" = "dashed"),
+      name   = NULL
+    ) +
+    scale_x_continuous(
+      breaks = c(2015, 2018, 2021, 2024, 2027, 2030),
+      labels = c("2015","2018","2021","2024","2027","2030")
+    ) +
+    labs(
+      title    = paste(res$name,
+                       "\u2014 Monthly Water Table Forecast (2025\u20132030)"),
+      subtitle = paste0(
+        "Training: 2015\u20132024 (full 10 years)  |  ",
+        "Model: FTSM (RAPCA, order = ", res$order, ", ARFIMA)  |  ",
+        "PC1 variance explained: ",
+        round(res$varprop[1] * 100, 1), "%"
+      ),
+      x = "Year",
+      y = "Water Table Depth (m)"
+    ) +
+    theme_classic() +
+    theme(
+      plot.title      = element_text(size = 12, face = "bold"),
+      plot.subtitle   = element_text(size = 8,  color = "grey30"),
+      strip.text      = element_text(size = 9,  face = "bold"),
+      axis.text.x     = element_text(angle = 45, hjust = 1, size = 7),
+      axis.text.y     = element_text(size = 7),
+      legend.position = "bottom"
+    )
+}
+```
+
+## ----------------------------------------------------------
+## PLOT 2: Selected months overlay (Jan, Apr, Jul, Oct)
+### Shows seasonal spread across years on a single panel
+## ----------------------------------------------------------
+
+```{r}
+plot_selected <- function(res, dat,
+                           selected = c(1, 4, 7, 10)) {
+ 
+  dat_sel <- dat %>%
+    filter(Month %in% selected) %>%
+    mutate(Month_label = factor(month_labels[Month],
+                                levels = month_labels[selected]))
+ 
+  colors <- c("#1B6CA8", "#16A085", "#E67E22", "#8E44AD")
+  names(colors) <- month_labels[selected]
+ 
+  ggplot(dat_sel,
+         aes(x = Year, y = Value,
+             color = Month_label, linetype = Series)) +
+    geom_line(linewidth = 1) +
+    geom_vline(xintercept = 2024.5,
+               linetype = "dotted", color = "grey40", linewidth = 0.6) +
+    annotate("text", x = 2024.6, y = Inf,
+             label = "Forecast \u2192",
+             hjust = 0, vjust = 1.8, size = 3, color = "grey40") +
+    scale_color_manual(values = colors, name = "Month") +
+    scale_linetype_manual(
+      values = c("Historical" = "solid", "Forecast" = "dashed"),
+      name   = NULL
+    ) +
+    scale_x_continuous(breaks = c(2015, 2018, 2021, 2024, 2027, 2030)) +
+    labs(
+      title    = paste(res$name,
+                       "\u2014 Water Table Forecast: Selected Months"),
+      subtitle = paste0(
+        "Training: 2015\u20132024  |  ",
+        "Solid: historical  |  Dashed: forecast (2025\u20132030)"
+      ),
+      x = "Year", y = "Water Table Depth (m)",
+      caption = paste0(
+        "FTSM (RAPCA, order = ", res$order, ", ARFIMA)  |  ",
+        "Variance explained \u2014 ",
+        paste0("PC", seq_along(res$varprop), ": ",
+               round(res$varprop * 100, 1), "%",
+               collapse = ",  ")
+      )
+    ) +
+    theme_classic() +
+    theme(
+      plot.title      = element_text(size = 12, face = "bold"),
+      plot.subtitle   = element_text(size = 9,  color = "grey30"),
+      plot.caption    = element_text(size = 7.5, color = "grey40"),
+      legend.position = "right",
+      axis.text.x     = element_text(angle = 45, hjust = 1)
+    )
+}
+```
+
+## ----------------------------------------------------------
+## Print all plots
+## ----------------------------------------------------------
+
+```{r}
+for (i in seq_along(full_forecasts)) {
+  print(plot_faceted(full_forecasts[[i]], all_plot_data[[i]]))
+  print(plot_selected(full_forecasts[[i]], all_plot_data[[i]]))
+}
+```
+
+## ----------------------------------------------------------
+## Forecast value table (for appendix or supplementary)
+## Rows = months, columns = forecast years, one table per district
+## ----------------------------------------------------------
+
+```{r}
+cat("\n========== FORECAST VALUES (mean water table depth, m) ==========\n")
+for (res in full_forecasts) {
+  cat("\nDistrict:", res$name, "\n")
+  tbl <- as.data.frame(round(res$fc_mat, 3))
+  rownames(tbl) <- month_labels
+  print(tbl)
+}
+```
+

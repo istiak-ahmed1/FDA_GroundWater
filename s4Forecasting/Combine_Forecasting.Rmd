@@ -1,0 +1,166 @@
+---
+title: "Combine Forecasting"
+author: "**Istiak Ahmed***, SO, ASICT Division, BARI*"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())
+```
+
+## ============================================================
+## Strategy: train on 2015–2022 (8 years), test on 2023–2024 (2 years)
+### Apply to all 4 districts consistently
+## ============================================================
+
+```{r}
+library(ftsa)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+## ----------------------------------------------------------
+## Helper: compute accuracy metrics for one district
+## ----------------------------------------------------------
+
+```{r}
+forecast_district <- function(csv_file, district_name,
+                              forecast_horizon = 6,
+                              order = 3) {
+  
+  # Read data
+  df <- read.csv(csv_file)
+  y_mat <- as.matrix(df)
+  
+  # Set column names as years
+  n_years <- ncol(y_mat)
+  years <- 2015:(2014 + n_years)
+  colnames(y_mat) <- as.character(years)
+  
+  # Use all available data for training
+  y_train <- y_mat  # Use all columns
+  
+  # Months (1-12)
+  x <- 1:nrow(y_mat)
+  
+  # Create functional time series object
+  fts_train <- fts(x = x,
+                   y = y_train,
+                   xname = "Month",
+                   yname = "Water Table Depth")
+  
+  # Fit functional time series model
+  fit <- ftsm(fts_train, order = order, method = "rapca")
+  
+  # Forecast for specified horizon
+  fc <- forecast(fit, h = forecast_horizon, method = "arfima")
+  
+  # Extract forecasted values
+  y_forecast <- fc$mean$y  # 12 x forecast_horizon matrix
+  
+  # Get forecast years
+  forecast_years <- (max(years) + 1):(max(years) + forecast_horizon)
+  colnames(y_forecast) <- as.character(forecast_years)
+  
+  # Extract variance explained by each functional principal component
+  varprop <- fit$varprop
+  
+  # Return results
+  list(
+    district = district_name,
+    years = years,
+    forecast_years = forecast_years,
+    y_train = y_train,
+    y_forecast = y_forecast,
+    x = x,
+    varprop = varprop,
+    fit = fit,
+    forecast_object = fc
+  )
+}
+```
+
+## ----------------------------------------------------------
+## Run for all 4 districts
+### Adjust file paths to match your working directory
+## ----------------------------------------------------------
+
+```{r}
+results <- list(
+  forecast_district("Borguna.csv", "Barguna", order = 3),
+  forecast_district("Joypurhat.csv", "Joypurhat", order = 3),
+  forecast_district("Mymensingh.csv", "Mymensingh", order = 3),
+  forecast_district("Netrokona.csv", "Netrokona", order = 5)
+)
+```
+
+#### Note: Netrokona uses order=5 due to its lower PC1 variance explained (37.8%)
+
+## ----------------------------------------------------------
+## Display model diagnostics
+## ----------------------------------------------------------
+
+```{r}
+cat("\n=== Model Diagnostics ===\n")
+for (r in results) {
+  cat("\n", r$district, ":\n", sep = "")
+  cat("  Functional Principal Components Variance Explained:\n")
+  for (i in 1:length(r$varprop)) {
+    cat(sprintf("    PC%d: %.1f%%\n", i, r$varprop[i] * 100))
+  }
+  cat(sprintf("  Total variance explained by top %d PCs: %.1f%%\n", 
+              length(r$varprop), sum(r$varprop) * 100))
+}
+```
+
+```{r,fig.width=15,fig.height=10}
+# Set up plotting parameters
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 2), oma = c(0, 0, 2, 0))
+
+for (r in results) {
+  # Plot training data (all historical years)
+  matplot(r$x, r$y_train,
+          type = "l", 
+          col = colorRampPalette(c("grey70", "grey40"))(ncol(r$y_train)),
+          lty = 1, 
+          lwd = 1.5,
+          xlab = "Month", 
+          ylab = "Water Table Depth (m)",
+          main = r$district,
+          xaxt = "n",
+          ylim = range(c(r$y_train, r$y_forecast), na.rm = TRUE))
+  
+  # Add month labels
+  axis(1, at = 1:12, labels = month.abb, las = 2, cex.axis = 0.7)
+  
+  # Add forecasted years with distinct colors
+  n_forecast <- ncol(r$y_forecast)
+  forecast_colors <- colorRampPalette(c("red","orange","blue"))(n_forecast)
+  
+  matlines(r$x, r$y_forecast, 
+           col = forecast_colors, 
+           lty = 2, 
+           lwd = 2)
+  
+  # Add legend
+  legend("topright",
+         legend = c(paste(r$forecast_years)),
+         col = c(forecast_colors),
+         lty = c(rep(2, n_forecast)),
+         lwd = c(rep(2, n_forecast)),
+         cex = 0.5, 
+         bty = "n",
+         ncol = 2)
+  
+  # Add model information
+  mtext(sprintf("Model order = %d | Total var explained = %.1f%%", 
+                length(r$varprop), sum(r$varprop) * 100),
+        side = 3, line = -1.5, cex = 0.6, col = "grey30")
+}
+
+# Add overall title
+mtext("Groundwater Level Forecasts (2025-2030)", 
+      outer = TRUE, cex = 1.2, font = 2)
+```
+
